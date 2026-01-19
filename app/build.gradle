@@ -23,10 +23,11 @@ android {
             applicationId "org.ikemen_engine.ikemen_go"
         }
 
-        minSdkVersion 19
+        minSdkVersion 21
         targetSdkVersion 30
         versionCode 1
         versionName "1.0"
+        resourceConfigurations += ["en", "de", "es", "fr", "ja", "pt", "zh"]
 //        externalNativeBuild {
 //            ndkBuild {
 //                arguments "APP_PLATFORM=android-19"

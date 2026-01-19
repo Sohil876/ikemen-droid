@@ -10,6 +10,7 @@ import android.content.ClipData;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
@@ -22,11 +23,13 @@ import android.hardware.Sensor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Message;
+import android.provider.DocumentsContract;
+import android.provider.Settings;
 import android.text.Editable;
 import android.text.InputType;
-import android.text.Selection;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.util.SparseArray;
@@ -46,10 +49,13 @@ import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.RelativeLayout;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import org.ikemen_engine.ikemen_go.R;
 
 import java.io.File;
 import java.util.Hashtable;
@@ -60,7 +66,7 @@ import java.util.Locale;
 */
 public class SDLActivity extends Activity implements View.OnSystemUiVisibilityChangeListener {
     static {
-        System.setProperty("SDL_HIDAPI_IGNORE_DEVICES", "1");
+//        System.setProperty("SDL_HIDAPI_IGNORE_DEVICES", "1");
         System.loadLibrary("main"); // match the Go shared lib name, usually libmain.so
     }
     public static native void nativeOnSDLReady(String path);
@@ -321,6 +327,22 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     protected SDLSurface createSDLSurface(Context context) {
         return new SDLSurface(context);
     }
+    private static final int FOLDER_PICKER_CODE = 42;
+    private SharedPreferences mSharedPrefs;
+    private static String mBasePath;
+    private Button mSDButton;
+    private final Runnable hideRunnable = () -> {
+        if (mSDButton != null) mSDButton.setVisibility(View.INVISIBLE);
+    };
+    private Handler mUIHandler = new Handler(android.os.Looper.getMainLooper());
+
+    // Update this with the directories you wish to check every time for file updates.
+    private final String[] UPDATE_FILE_CHECK_DIRS = new String[] {
+        "external/script"
+    };
+
+    // Uses folder selection logic if set to true. Set to false for full game scenarios.
+    private final boolean USE_FOLDER_SELECT = true;
 
     // Setup
     @Override
@@ -338,6 +360,8 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         Log.v(TAG, "Model: " + Build.MODEL);
         Log.v(TAG, "onCreate()");
         super.onCreate(savedInstanceState);
+
+        mSharedPrefs = this.getSharedPreferences(getString(R.string.prefs_key), MODE_PRIVATE);
 
         try {
             Thread.currentThread().setName("SDLActivity");
@@ -409,9 +433,42 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
 
         // Set up the surface
         mSurface = createSDLSurface(this);
+        mSurface.setZOrderOnTop(false);
+        mSurface.setZOrderMediaOverlay(true);
+
+        FrameLayout rootLayout = new FrameLayout(this);
+        rootLayout.addView(mSurface, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+
+        // WHAT IT WAS
+//        mLayout = new RelativeLayout(this);
+//        mLayout.addView(mSurface);
 
         mLayout = new RelativeLayout(this);
-        mLayout.addView(mSurface);
+        rootLayout.addView(mLayout, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+
+//        mLayout.addView(mSurface);
+
+        // Add the "Select folder" button.
+        mSDButton = new Button(this);
+        mSDButton.setText(R.string.game_folder_str);
+        mSDButton.setAlpha(0.5f);
+
+        RelativeLayout.LayoutParams params = new RelativeLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        params.addRule(RelativeLayout.ALIGN_PARENT_TOP);
+        params.addRule(RelativeLayout.ALIGN_PARENT_RIGHT);
+
+        if (USE_FOLDER_SELECT) {
+            mLayout.addView(mSDButton, params);
+            mSDButton.setOnClickListener(v -> checkAndPickFolder());
+            mUIHandler.postDelayed(hideRunnable, 5000);
+        }
 
         // Get our current screen orientation and pass it down.
         mCurrentOrientation = SDLActivity.getCurrentOrientation();
@@ -427,11 +484,15 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         } catch(Exception ignored) {
         }
 
-        setContentView(mLayout);
+        mSDButton.setZ(100f); // Force it to the top of the Z-axis
+
+//        setContentView(mLayout); // WHAT IT WAS
+        setContentView(rootLayout);
 
         setWindowStyle(false);
 
-        getWindow().getDecorView().setOnSystemUiVisibilityChangeListener(this);
+        View dv = getWindow().getDecorView();
+        dv.setOnSystemUiVisibilityChangeListener(this);
 
         // Get filename from "Open with" of another application
         Intent intent = getIntent();
@@ -443,46 +504,212 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
             }
         }
 
-        File baseDir = getExternalFilesDir(null);
-        File checkFile = new File(baseDir, "data/common1.cns.zss");
-        if (checkFile.exists()) {
-            Log.i("SDLActivity", "Found common1.cns.zss. Skipping extraction.");
-            onSDLReady();
+        if (USE_FOLDER_SELECT) {
+            mBasePath = mSharedPrefs.getString(getString(R.string.game_folder_key), "");
         } else {
-            // Extract our files
-            ProgressDialog progress = new ProgressDialog(this);
-            progress.setTitle("First Run");
-            progress.setMessage("Extracting game assets... Please wait.");
-            progress.setCancelable(false);
-            progress.show();
-
-            new Thread(() -> {
-                try {
-                    AssetExtractor.extractAll(getAssets(), baseDir);
-
-                    // Success! Back to main thread to dismiss and start Go
-                    runOnUiThread(() -> {
-                        progress.dismiss();
-                        onSDLReady();
-                    });
-                } catch (Exception e) {
-                    runOnUiThread(() -> {
-                        progress.dismiss();
-                        new AlertDialog.Builder(SDLActivity.this)
-                            .setTitle("Extraction Error")
-                            .setMessage(e.getMessage())
-                            .setPositiveButton("Exit", (d, w) -> finish())
-                            .show();
-                    });
-                }
-            }).start();
+            mBasePath = getExternalFilesDir(null).getAbsolutePath();
         }
+
+        if (mBasePath.isEmpty()) {
+            checkAndPickFolder();
+        } else {
+            setupContent();
+        }
+    }
+
+    @Override
+    public boolean dispatchTouchEvent(android.view.MotionEvent ev) {
+        if (ev.getAction() == android.view.MotionEvent.ACTION_DOWN) {
+            if (mSDButton != null) {
+                // Force it to be visible and at the front
+                mSDButton.setVisibility(View.VISIBLE);
+                mSDButton.bringToFront();
+                mSDButton.getParent().requestLayout(); // Force the container to refresh
+
+                // Reset the timer
+                mUIHandler.removeCallbacks(hideRunnable);
+                mUIHandler.postDelayed(hideRunnable, 5000);
+            }
+        }
+        return super.dispatchTouchEvent(ev);
+    }
+
+    public void checkAndPickFolder() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!Environment.isExternalStorageManager()) {
+                // Send user to Settings to grant "All Files Access"
+                try {
+                    Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                    intent.addCategory("android.intent.category.DEFAULT");
+                    intent.setData(Uri.parse(String.format("package:%s", getPackageName())));
+                    startActivity(intent);
+                } catch (Exception e) {
+                    Intent intent = new Intent();
+                    intent.setAction(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
+                    startActivity(intent);
+                }
+            } else {
+                openDirectoryPicker();
+            }
+        } else {
+            // Legacy permissions (Read/Write External) for older Android
+            openDirectoryPicker();
+        }
+    }
+
+    public String getFullPathFromTreeUri(Uri treeUri) {
+        if (treeUri == null) return null;
+        String treeId = DocumentsContract.getTreeDocumentId(treeUri);
+        String[] split = treeId.split(":");
+        String type = split[0];
+        String path = (split.length > 1) ? split[1] : "";
+
+        if ("primary".equalsIgnoreCase(type)) {
+            return Environment.getExternalStorageDirectory() + "/" + path;
+        } else {
+            // This is for physical SD cards.
+            // We look for the UUID (type) in the system's storage list.
+            File[] externalDirs = getExternalFilesDirs(null);
+            for (File f : externalDirs) {
+                if (f != null) {
+                    String absPath = f.getAbsolutePath();
+                    if (absPath.contains(type)) {
+                        return absPath.split("/Android/")[0] + "/" + path;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == FOLDER_PICKER_CODE) {
+            boolean isFreshRun = (mBasePath == null);
+            if (resultCode == RESULT_OK) {
+                if (data != null) {
+                    Uri treeUri = data.getData();
+                    // Take persistent permission so it can be accessed again after reboot
+                    getContentResolver().takePersistableUriPermission(treeUri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                    String selectedPath = getFullPathFromTreeUri(treeUri); // convert Uri to File path
+                    if (selectedPath != null && !selectedPath.isEmpty()) {
+                        mBasePath = selectedPath;
+                    } else {
+                        mBasePath = getExternalFilesDir(null).getAbsolutePath();
+                    }
+                } else if (isFreshRun) {
+                    mBasePath = getExternalFilesDir(null).getAbsolutePath();
+                }
+            } else if (isFreshRun) {
+                mBasePath = getExternalFilesDir(null).getAbsolutePath();
+            }
+            mSharedPrefs.edit().putString(getString(R.string.game_folder_key), mBasePath).commit();
+
+            if (isFreshRun) {
+                setupContent();
+            } else {
+                Intent intent = getBaseContext().getPackageManager()
+                        .getLaunchIntentForPackage(getBaseContext().getPackageName());
+                intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(intent);
+                // Give some time for the process to DIE
+                android.os.Process.killProcess(android.os.Process.myPid());
+                Runtime.getRuntime().exit(0);
+            }
+        }
+    }
+
+    public void openDirectoryPicker() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        startActivityForResult(intent, FOLDER_PICKER_CODE);
+    }
+
+    private boolean filesNeedUpdate(File baseDir, String[] dirsToCheck) {
+        try {
+            // List all files in the APK's directories to check
+            for (String checkDir : dirsToCheck) {
+                String[] files = getAssets().list(checkDir);
+                if (files == null || files.length == 0) return false;
+
+                for (String fileName : files) {
+                    String relativePath = checkDir + "/" + fileName;
+                    File localFile = new File(baseDir, relativePath);
+
+                    // If a script is missing locally, update
+                    if (!localFile.exists()) return true;
+
+                    // If the CRC doesn't match, update
+                    long apkCRC = AssetExtractor.getAssetCRC(getAssets(), relativePath);
+                    long localCRC = AssetExtractor.getFileCRC(localFile);
+                    if (apkCRC != localCRC) {
+                        Log.i("AssetExtractor", "Mismatch detected: " + fileName);
+                        return true;
+                    }
+                }
+            }
+        } catch (java.io.IOException e) {
+            Log.e("AssetExtractor", "Error checking scripts", e);
+            return true; // Safety first: update if we can't be sure
+        }
+        return false; // Everything matches
+    }
+
+    private void setupContent() {
+        File baseDir = new File(mBasePath);
+
+        // Run the comparison in the background
+        new Thread(() -> {
+            boolean updateRequired = filesNeedUpdate(baseDir, UPDATE_FILE_CHECK_DIRS);
+
+            if (!updateRequired) {
+                Log.i("SDLActivity", "Scripts match APK. Skipping extraction.");
+                runOnUiThread(this::onSDLReady);
+            } else {
+                Log.i("SDLActivity", "Specified files are outdated or missing. Beginning extraction...");
+
+                // Switch to UI thread to show the progress dialog
+                runOnUiThread(() -> {
+                    ProgressDialog progress = new ProgressDialog(this);
+                    progress.setTitle(R.string.updating_files_title);
+                    progress.setMessage(getString(R.string.updating_files_msg));
+                    progress.setCancelable(false);
+                    progress.show();
+
+                    // Start actual extraction thread
+                    new Thread(() -> {
+                        try {
+                            AssetExtractor.extractAll(getAssets(), baseDir);
+                            runOnUiThread(() -> {
+                                progress.dismiss();
+                                onSDLReady();
+                            });
+                        } catch (Exception e) {
+                            runOnUiThread(() -> {
+                                progress.dismiss();
+                                new AlertDialog.Builder(this)
+                                        .setTitle(R.string.update_error_title)
+                                        .setMessage(e.getMessage())
+                                        .setPositiveButton(R.string.exit_str, (d, w) -> finish())
+                                        .show();
+                            });
+                        }
+                    }).start();
+                });
+            }
+        }).start();
     }
 
     private void onSDLReady() {
         // Pass the exact path we just extracted to
-        String path = getExternalFilesDir(null).getAbsolutePath();
-        SDLActivity.nativeOnSDLReady(path);
+        mBasePath = mSharedPrefs.getString(getString(R.string.game_folder_key), "");
+
+        // Still empty, default to the external files dir (which is actually internal).
+        if (mBasePath.isEmpty()) {
+            mBasePath = getExternalFilesDir(null).getAbsolutePath();
+        }
+        SDLActivity.nativeOnSDLReady(mBasePath);
     }
 
     protected void pauseNativeThread() {
@@ -525,6 +752,17 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     protected void onResume() {
         Log.v(TAG, "onResume()");
         super.onResume();
+
+        // If we were waiting for the "All Files Access" permission...
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Permission is now granted?
+            if (Environment.isExternalStorageManager()) {
+                // If mBasePath is still empty, let's open the picker now.
+                if (mBasePath == null || mBasePath.isEmpty()) {
+                    openDirectoryPicker();
+                }
+            }
+        }
 
         if (mHIDDeviceManager != null) {
             mHIDDeviceManager.setFrozen(false);

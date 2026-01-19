@@ -15,4 +15,9 @@
 ### LICENSE NOTICE
 I.K.E.M.E.N-Go specific logic (C) 2026 Jesuszilla. SDLActivity was modified and AssetExtractor was added to accomplish this purpose.
 
+Special thanks:
+* Lasombra Demon - Spanish translations
+* MotorRoach - Portuguese translations
+* Vans - Chinese & Japanese translation feedback
+
 The original license is included in LICENSE.txt
